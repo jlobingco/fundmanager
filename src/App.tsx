@@ -180,6 +180,23 @@ export default function App() {
     period: '15th' as '15th' | '30th',
     month: new Date().toISOString().slice(0, 7)
   });
+
+  // Auto-compute contribution amount
+  useEffect(() => {
+    if (newContribution.member_id) {
+      const member = members.find(m => m.id === Number(newContribution.member_id));
+      if (member) {
+        const contributionPerSlot = 500; // Standard contribution per slot
+        const annualFeePerSlot = 200;
+        let total = member.slots * contributionPerSlot;
+        if (newContribution.isFirstOfYear) {
+          total += member.slots * annualFeePerSlot;
+        }
+        setNewContribution(prev => ({ ...prev, amount: total }));
+      }
+    }
+  }, [newContribution.member_id, newContribution.isFirstOfYear, members]);
+
   const [newLoan, setNewLoan] = useState({ 
     member_id: '', 
     borrower_name: '', 
@@ -993,7 +1010,7 @@ Financial Summary:
               min="1"
               required
               value={newMember.slots}
-              onChange={e => setNewMember({...newMember, slots: parseInt(e.target.value)})}
+              onChange={e => setNewMember({...newMember, slots: parseInt(e.target.value) || 0})}
               className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
             />
           </div>
@@ -1030,12 +1047,13 @@ Financial Summary:
               </select>
             </div>
             <div>
-              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Amount</label>
+              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Amount (₱500/slot)</label>
               <input 
                 type="number" 
+                step="500"
                 required
                 value={newContribution.amount}
-                onChange={e => setNewContribution({...newContribution, amount: parseFloat(e.target.value)})}
+                onChange={e => setNewContribution({...newContribution, amount: parseFloat(e.target.value) || 0})}
                 className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
               />
             </div>
@@ -1119,7 +1137,7 @@ Financial Summary:
                 type="number" 
                 required
                 value={newLoan.amount}
-                onChange={e => setNewLoan({...newLoan, amount: parseFloat(e.target.value)})}
+                onChange={e => setNewLoan({...newLoan, amount: parseFloat(e.target.value) || 0})}
                 className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
               />
             </div>
@@ -1127,7 +1145,7 @@ Financial Summary:
               <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Term (Months)</label>
               <select 
                 value={newLoan.months}
-                onChange={e => setNewLoan({...newLoan, months: parseInt(e.target.value)})}
+                onChange={e => setNewLoan({...newLoan, months: parseInt(e.target.value) || 1})}
                 className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
               >
                 {[1,2,3,4,5].map(m => <option key={m} value={m}>{m} Month{m > 1 ? 's' : ''}</option>)}
@@ -1174,7 +1192,7 @@ Financial Summary:
               type="number" 
               required
               value={loanPayment.amount}
-              onChange={e => setLoanPayment({...loanPayment, amount: parseFloat(e.target.value)})}
+              onChange={e => setLoanPayment({...loanPayment, amount: parseFloat(e.target.value) || 0})}
               className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
             />
           </div>
@@ -1234,7 +1252,7 @@ Financial Summary:
                   This Loan Agreement is entered into on this <strong>{new Date().toLocaleDateString()}</strong>, by and between:
                 </p>
                 <div className="mt-4 space-y-2">
-                  <p><strong>Lender:</strong> Savers Fund Manager, representing the Savers Fund Collective.</p>
+                  <p><strong>Lender:</strong> Fund Holder/Representative, representing the Savers Fund Collective.</p>
                   <p><strong>Borrower:</strong> {contractLoan.debtor_name}</p>
                   <p><strong>Guarantor:</strong> {contractLoan.guarantor_name}</p>
                 </div>
@@ -1289,12 +1307,12 @@ Financial Summary:
                       <td className="border border-slate-200 p-2 text-right">{formatCurrency(contractLoan.principal)}</td>
                     </tr>
                     <tr>
-                      <td className="border border-slate-200 p-2">Interest Portion (4% Dividend Pool)</td>
-                      <td className="border border-slate-200 p-2 text-right">{formatCurrency(contractLoan.totalInterest * (4/6))}</td>
+                      <td className="border border-slate-200 p-2">Total Interest (6% Monthly)</td>
+                      <td className="border border-slate-200 p-2 text-right">{formatCurrency(contractLoan.totalInterest)}</td>
                     </tr>
-                    <tr>
-                      <td className="border border-slate-200 p-2">Interest Portion (2% Guarantor Reward)</td>
-                      <td className="border border-slate-200 p-2 text-right">{formatCurrency(contractLoan.totalInterest * (2/6))}</td>
+                    <tr className="bg-slate-50 font-bold">
+                      <td className="border border-slate-200 p-2">Total Repayment Amount</td>
+                      <td className="border border-slate-200 p-2 text-right">{formatCurrency(contractLoan.principal + contractLoan.totalInterest)}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -1315,7 +1333,7 @@ Financial Summary:
                   <div className="space-y-8">
                     <div className="border-t border-black pt-2">
                       <p className="font-bold uppercase text-xs">Lender Signature</p>
-                      <p className="text-sm mt-1">Savers Fund Manager</p>
+                      <p className="text-sm mt-1">Fund Holder/Representative</p>
                     </div>
                     <div className="pt-2">
                       <p className="font-bold uppercase text-xs text-slate-400">Date Signed</p>
