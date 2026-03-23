@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "Member": {
+      "title": "Member",
+      "description": "A member of the Savers Fund",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Full name of the member" },
+        "slots": { "type": "integer", "description": "Number of slots owned" },
+        "status": { "type": "string", "enum": ["Active", "Inactive"], "description": "Current status" },
+        "joined_at": { "type": "string", "format": "date-time", "description": "When the member joined" }
+      },
+      "required": ["name", "slots"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A financial transaction (contribution, fee, etc.)",
+      "type": "object",
+      "properties": {
+        "member_id": { "type": "string", "description": "ID of the member" },
+        "amount": { "type": "number", "description": "Amount in PHP" },
+        "type": { "type": "string", "enum": ["Contribution", "AnnualFee", "Penalty", "Refund"], "description": "Type of transaction" },
+        "period": { "type": "string", "enum": ["15th", "30th"], "description": "Billing period" },
+        "month": { "type": "string", "description": "YYYY-MM format" },
+        "date": { "type": "string", "format": "date-time", "description": "Transaction date" }
+      },
+      "required": ["member_id", "amount", "type", "date"]
+    },
+    "Loan": {
+      "title": "Loan",
+      "description": "A loan application or active loan",
+      "type": "object",
+      "properties": {
+        "member_id": { "type": "string", "description": "ID of the borrower (if member)" },
+        "borrower_name": { "type": "string", "description": "Name of the borrower (if non-member)" },
+        "guarantor_id": { "type": "string", "description": "ID of the guarantor" },
+        "principal": { "type": "number", "description": "Principal amount" },
+        "interest_rate": { "type": "number", "description": "Monthly interest rate (default 0.06)" },
+        "months": { "type": "integer", "description": "Loan term in months" },
+        "status": { "type": "string", "enum": ["Pending", "Active", "Paid", "Rejected"], "description": "Loan status" },
+        "created_at": { "type": "string", "format": "date-time", "description": "Application date" },
+        "due_at": { "type": "string", "format": "date-time", "description": "Due date" }
+      },
+      "required": ["guarantor_id", "principal", "months", "status", "created_at"]
+    },
+    "LoanPayment": {
+      "title": "LoanPayment",
+      "description": "A payment made towards a loan",
+      "type": "object",
+      "properties": {
+        "loan_id": { "type": "string", "description": "ID of the loan" },
+        "amount_paid": { "type": "number", "description": "Total amount paid" },
+        "interest_portion": { "type": "number", "description": "Portion applied to interest" },
+        "principal_portion": { "type": "number", "description": "Portion applied to principal" },
+        "date": { "type": "string", "format": "date-time", "description": "Payment date" }
+      },
+      "required": ["loan_id", "amount_paid", "date"]
+    }
+  },
+  "firestore": {
+    "members": {
+      "schema": "Member",
+      "description": "Collection of fund members"
+    },
+    "transactions": {
+      "schema": "Transaction",
+      "description": "Collection of all financial transactions"
+    },
+    "loans": {
+      "schema": "Loan",
+      "description": "Collection of loan applications and active loans"
+    },
+    "loan_payments": {
+      "schema": "LoanPayment",
+      "description": "Collection of all loan payments"
+    }
+  }
+}

@@ -1,0 +1,146 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: members
+    // Document ID: auto-generated
+    // Fields:
+    //   - name: string (required, unique-ish)
+    //   - slots: number (required, positive)
+    //   - status: string (required, 'Active' or 'Inactive')
+    //   - joined_at: timestamp (required)
+    //
+    // Collection: transactions
+    // Document ID: auto-generated
+    // Fields:
+    //   - member_id: string (required, ref to members)
+    //   - amount: number (required)
+    //   - type: string (required, 'Contribution', 'AnnualFee', 'Penalty', 'Refund')
+    //   - period: string (optional, '15th' or '30th')
+    //   - month: string (optional, 'YYYY-MM')
+    //   - date: timestamp (required)
+    //
+    // Collection: loans
+    // Document ID: auto-generated
+    // Fields:
+    //   - member_id: string (optional, ref to members)
+    //   - borrower_name: string (optional, for non-members)
+    //   - guarantor_id: string (required, ref to members)
+    //   - principal: number (required, positive)
+    //   - interest_rate: number (required, default 0.06)
+    //   - months: number (required, 1-5)
+    //   - status: string (required, 'Pending', 'Active', 'Paid', 'Rejected')
+    //   - created_at: timestamp (required)
+    //   - due_at: timestamp (required)
+    //
+    // Collection: loan_payments
+    // Document ID: auto-generated
+    // Fields:
+    //   - loan_id: string (required, ref to loans)
+    //   - amount_paid: number (required, positive)
+    //   - interest_portion: number (required)
+    //   - principal_portion: number (required)
+    //   - date: timestamp (required)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "juvelynlobingco@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Domain Validators
+    function isValidMember(data) {
+      return hasRequiredFields(['name', 'slots', 'status', 'joined_at']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.slots is int && data.slots > 0 &&
+             data.status in ['Active', 'Inactive'] &&
+             data.joined_at is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return hasRequiredFields(['member_id', 'amount', 'type', 'date']) &&
+             data.member_id is string &&
+             data.amount is number &&
+             data.type in ['Contribution', 'AnnualFee', 'Penalty', 'Refund'] &&
+             data.date is timestamp;
+    }
+
+    function isValidLoan(data) {
+      return hasRequiredFields(['guarantor_id', 'principal', 'months', 'status', 'created_at', 'due_at']) &&
+             data.guarantor_id is string &&
+             data.principal is number && data.principal > 0 &&
+             data.months is int && data.months >= 1 && data.months <= 5 &&
+             data.status in ['Pending', 'Active', 'Paid', 'Rejected'] &&
+             data.created_at is timestamp &&
+             data.due_at is timestamp;
+    }
+
+    function isValidLoanPayment(data) {
+      return hasRequiredFields(['loan_id', 'amount_paid', 'interest_portion', 'principal_portion', 'date']) &&
+             data.loan_id is string &&
+             data.amount_paid is number && data.amount_paid > 0 &&
+             data.interest_portion is number &&
+             data.principal_portion is number &&
+             data.date is timestamp;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    match /members/{memberId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdmin() && isValidMember(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /transactions/{txId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidTransaction(request.resource.data);
+      allow update: if isAdmin() && isValidTransaction(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /loans/{loanId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidLoan(request.resource.data);
+      allow update: if isAdmin() && isValidLoan(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /loan_payments/{paymentId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidLoanPayment(request.resource.data);
+      allow update: if isAdmin() && isValidLoanPayment(request.resource.data);
+      allow delete: if isAdmin();
+    }
+    
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}

@@ -21,16 +21,47 @@ import {
   Filter,
   Calendar,
   Wallet,
-  Coins
+  Coins,
+  LogIn,
+  LogOut
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { toPng, toBlob } from 'html-to-image';
 import jsPDF from 'jspdf';
+import { 
+  auth, 
+  db, 
+  loginWithGoogle, 
+  logout, 
+  handleFirestoreError, 
+  OperationType 
+} from './firebase';
+import { 
+  onAuthStateChanged, 
+  User 
+} from 'firebase/auth';
+import { 
+  collection, 
+  doc, 
+  getDoc, 
+  getDocs, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query, 
+  where, 
+  orderBy, 
+  onSnapshot, 
+  Timestamp,
+  runTransaction,
+  limit
+} from 'firebase/firestore';
 
 // --- Types ---
 
 interface Member {
-  id: number;
+  id: string;
   name: string;
   slots: number;
   status: string;
@@ -51,8 +82,8 @@ interface Member {
 }
 
 interface Transaction {
-  id: number;
-  member_id: number;
+  id: string;
+  member_id: string;
   amount: number;
   type: 'Contribution' | 'AnnualFee' | 'Penalty' | 'Refund';
   period: '15th' | '30th';
@@ -61,9 +92,9 @@ interface Transaction {
 }
 
 interface Loan {
-  id: number;
-  member_id: number | null;
-  guarantor_id: number;
+  id: string;
+  member_id: string | null;
+  guarantor_id: string;
   borrower_name: string | null;
   debtor_name: string;
   guarantor_name: string;
@@ -150,6 +181,8 @@ const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose:
 );
 
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [view, setView] = useState<'dashboard' | 'members' | 'loans' | 'history'>('dashboard');
   const [summary, setSummary] = useState<Summary | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -181,10 +214,19 @@ export default function App() {
     month: new Date().toISOString().slice(0, 7)
   });
 
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUser(user);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
   // Auto-compute contribution amount
   useEffect(() => {
     if (newContribution.member_id) {
-      const member = members.find(m => m.id === Number(newContribution.member_id));
+      const member = members.find(m => m.id === newContribution.member_id);
       if (member) {
         const contributionPerSlot = 500; // Standard contribution per slot
         const annualFeePerSlot = 200;
@@ -207,190 +249,357 @@ export default function App() {
   const [loanPayment, setLoanPayment] = useState({ loan_id: '', amount: 0 });
 
   useEffect(() => {
-    fetchData();
-  }, []);
-
-  const fetchData = async () => {
-    setIsLoading(true);
-    try {
-      const [sumRes, memRes, loanRes, histRes] = await Promise.all([
-        fetch('/api/summary'),
-        fetch('/api/members'),
-        fetch('/api/loans'),
-        fetch('/api/contributions/all')
-      ]);
-
-      setSummary(await sumRes.json());
-      setMembers(await memRes.json());
-      setLoans(await loanRes.json());
-      setAllContributions(await histRes.json());
-    } catch (error) {
-      console.error("Error fetching data:", error);
-    } finally {
-      setIsLoading(false);
+    if (isAuthReady && user) {
+      fetchData();
     }
+  }, [isAuthReady, user]);
+
+  const fetchData = () => {
+    setIsLoading(true);
+    
+    // Real-time listeners
+    const unsubMembers = onSnapshot(collection(db, 'members'), (snapshot) => {
+      const membersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Member));
+      setMembers(membersData);
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'members'));
+
+    const unsubLoans = onSnapshot(collection(db, 'loans'), async (snapshot) => {
+      const loansData = await Promise.all(snapshot.docs.map(async (loanDoc) => {
+        const data = loanDoc.data();
+        const totalInterest = data.principal * data.interest_rate * data.months;
+        const totalToPay = data.principal + totalInterest;
+        const numPayments = data.months * 2;
+        const biMonthlyPayment = totalToPay / numPayments;
+
+        // Get payments for this loan
+        const paymentsSnap = await getDocs(query(collection(db, 'loan_payments'), where('loan_id', '==', loanDoc.id)));
+        const amountPaid = paymentsSnap.docs.reduce((sum, d) => sum + d.data().amount_paid, 0);
+        const remainingBalance = Math.max(0, totalToPay - amountPaid);
+
+        // Get debtor and guarantor names
+        let debtor_name = data.borrower_name || 'Unknown';
+        if (data.member_id) {
+          const m = members.find(m => m.id === data.member_id);
+          if (m) debtor_name = m.name;
+        }
+        
+        let guarantor_name = 'Unknown';
+        const g = members.find(m => m.id === data.guarantor_id);
+        if (g) guarantor_name = g.name;
+
+        return { 
+          id: loanDoc.id, 
+          ...data, 
+          debtor_name, 
+          guarantor_name,
+          totalInterest, 
+          biMonthlyPayment, 
+          amountPaid, 
+          remainingBalance 
+        } as Loan;
+      }));
+      setLoans(loansData);
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'loans'));
+
+    const unsubTx = onSnapshot(query(collection(db, 'transactions'), orderBy('date', 'desc')), (snapshot) => {
+      const txData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Transaction));
+      setAllContributions(txData.filter(t => t.type === 'Contribution' || t.type === 'AnnualFee'));
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'transactions'));
+
+    setIsLoading(false);
+    return () => {
+      unsubMembers();
+      unsubLoans();
+      unsubTx();
+    };
   };
 
+  // Recalculate summary whenever data changes
+  useEffect(() => {
+    if (members.length > 0 || loans.length > 0 || allContributions.length > 0) {
+      const totalContributions = allContributions.filter(t => t.type === 'Contribution').reduce((sum, t) => sum + t.amount, 0);
+      const totalAnnualFees = allContributions.filter(t => t.type === 'AnnualFee').reduce((sum, t) => sum + t.amount, 0);
+      const totalPenalties = allContributions.filter(t => t.type === 'Penalty').reduce((sum, t) => sum + t.amount, 0);
+      const totalRefunds = allContributions.filter(t => t.type === 'Refund').reduce((sum, t) => sum + t.amount, 0);
+      
+      const activeLoans = loans.filter(l => l.status === 'Active').reduce((sum, l) => sum + l.principal, 0);
+      
+      const totalMembers = members.filter(m => m.status === 'Active').length;
+      const totalSlots = members.filter(m => m.status === 'Active').reduce((sum, m) => sum + m.slots, 0);
+
+      setSummary({
+        cashOnHand: (totalContributions + totalAnnualFees + totalPenalties) - (activeLoans + totalRefunds),
+        totalPortfolio: activeLoans,
+        dividendPool: 0, // Simplified for now
+        totalGuarantorRewards: 0, // Simplified for now
+        totalPenalties,
+        totalMembers,
+        totalSlots
+      });
+    }
+  }, [members, loans, allContributions]);
+
   const handleSelectMember = async (member: Member) => {
+    setIsLoading(true);
     try {
-      const [detRes, histRes] = await Promise.all([
-        fetch(`/api/members/${member.id}`),
-        fetch(`/api/members/${member.id}/contributions`)
-      ]);
-      setSelectedMember(await detRes.json());
-      setContributionHistory(await histRes.json());
+      const memberId = member.id;
+      
+      // Calculate member stats
+      const txSnap = await getDocs(query(collection(db, 'transactions'), where('member_id', '==', memberId)));
+      const txs = txSnap.docs.map(d => d.data());
+      
+      const principal = txs.filter(t => t.type === 'Contribution').reduce((sum, t) => sum + t.amount, 0);
+      const annualFees = txs.filter(t => t.type === 'AnnualFee').reduce((sum, t) => sum + t.amount, 0);
+      
+      const currentYear = new Date().getFullYear().toString();
+      const annualFeePaidThisYear = txs.some(t => t.type === 'AnnualFee' && t.date.startsWith(currentYear));
+      
+      const monthsContributed = new Set(txs.filter(t => t.type === 'Contribution').map(t => t.month)).size;
+
+      // Member loans
+      const mLoans = loans.filter(l => l.status === 'Active' && (l.member_id === memberId || l.borrower_name === member.name || l.guarantor_id === memberId));
+      const outstandingDebt = mLoans.reduce((sum, l) => sum + l.remainingBalance, 0);
+      const currentPrincipalDebt = mLoans.reduce((sum, l) => {
+        const principalPaid = (l.amountPaid / (1 + (l.interest_rate * l.months))) || 0;
+        return sum + Math.max(0, l.principal - principalPaid);
+      }, 0);
+
+      const totalLoanAmount = loans.filter(l => l.member_id === memberId || l.borrower_name === member.name || l.guarantor_id === memberId).reduce((sum, l) => sum + l.principal, 0);
+      const totalGuaranteedAmount = loans.filter(l => l.guarantor_id === memberId && l.status === 'Active' && l.member_id !== memberId && l.borrower_name !== member.name).reduce((sum, l) => sum + l.principal, 0);
+
+      setSelectedMember({
+        ...member,
+        stats: {
+          principal,
+          dividendShare: 0, 
+          guarantorInterest: 0, 
+          outstandingDebt,
+          currentPrincipalDebt,
+          totalLoanAmount,
+          totalGuaranteedAmount,
+          annualFees,
+          annualFeePaidThisYear,
+          monthsContributed,
+          expectedReceivable: principal - outstandingDebt
+        }
+      });
+      
+      setContributionHistory(txs.filter(t => t.type === 'Contribution' || t.type === 'AnnualFee') as Transaction[]);
     } catch (error) {
-      console.error("Error fetching member details:", error);
+      handleFirestoreError(error, OperationType.GET, `members/${member.id}`);
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const handleAddMember = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/members', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newMember)
-      });
-      if (res.ok) {
-        setIsAddMemberOpen(false);
-        setNewMember({ name: '', slots: 1 });
-        fetchData();
-      } else {
-        const err = await res.json();
-        alert(err.error);
+      const q = query(collection(db, 'members'), where('name', '==', newMember.name));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        alert("A member with this name already exists.");
+        return;
       }
+
+      await addDoc(collection(db, 'members'), {
+        ...newMember,
+        status: 'Active',
+        joined_at: new Date().toISOString()
+      });
+      
+      setIsAddMemberOpen(false);
+      setNewMember({ name: '', slots: 1 });
     } catch (error) {
-      console.error("Error adding member:", error);
+      handleFirestoreError(error, OperationType.CREATE, 'members');
     }
   };
 
   const handleDeleteMember = async () => {
     if (!memberToDelete) return;
     try {
-      await fetch(`/api/members/${memberToDelete.id}`, { method: 'DELETE' });
+      await deleteDoc(doc(db, 'members', memberToDelete.id));
       setIsDeleteConfirmOpen(false);
       setMemberToDelete(null);
       if (selectedMember?.id === memberToDelete.id) setSelectedMember(null);
-      fetchData();
     } catch (error) {
-      console.error("Error deleting member:", error);
+      handleFirestoreError(error, OperationType.DELETE, `members/${memberToDelete.id}`);
     }
   };
 
   const handleAddContribution = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/contributions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newContribution)
-      });
-      if (res.ok) {
-        setIsAddContributionOpen(false);
-        setNewContribution({ ...newContribution, amount: 0 });
-        fetchData();
-        if (selectedMember && Number(newContribution.member_id) === selectedMember.id) {
-          handleSelectMember(selectedMember);
-        }
+      const member = members.find(m => m.id === newContribution.member_id);
+      if (!member) return;
+
+      if (newContribution.isFirstOfYear) {
+        const annualFeeTotal = 200 * member.slots;
+        await addDoc(collection(db, 'transactions'), {
+          member_id: newContribution.member_id,
+          amount: annualFeeTotal,
+          type: 'AnnualFee',
+          period: newContribution.period,
+          month: newContribution.month,
+          date: new Date().toISOString()
+        });
+        await addDoc(collection(db, 'transactions'), {
+          member_id: newContribution.member_id,
+          amount: newContribution.amount - annualFeeTotal,
+          type: 'Contribution',
+          period: newContribution.period,
+          month: newContribution.month,
+          date: new Date().toISOString()
+        });
+      } else {
+        await addDoc(collection(db, 'transactions'), {
+          member_id: newContribution.member_id,
+          amount: newContribution.amount,
+          type: 'Contribution',
+          period: newContribution.period,
+          month: newContribution.month,
+          date: new Date().toISOString()
+        });
+      }
+
+      setIsAddContributionOpen(false);
+      setNewContribution({ ...newContribution, amount: 0 });
+      if (selectedMember && newContribution.member_id === selectedMember.id) {
+        handleSelectMember(selectedMember);
       }
     } catch (error) {
-      console.error("Error adding contribution:", error);
+      handleFirestoreError(error, OperationType.CREATE, 'transactions');
     }
   };
 
   const handleAddLoan = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/loans', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newLoan)
-      });
-      if (res.ok) {
-        const data = await res.json();
-        
-        // Prepare loan data for contract generation
-        const borrower = members.find(m => m.id === Number(newLoan.member_id));
-        const guarantor = members.find(m => m.id === Number(newLoan.guarantor_id));
-        const principal = Number(newLoan.amount);
-        const months = Number(newLoan.months);
-        const totalInterest = principal * 0.06 * months;
-        const totalToPay = principal + totalInterest;
-        const biMonthlyPayment = totalToPay / (months * 2);
+      const borrowerId = newLoan.member_id || null;
+      const guarantorId = newLoan.guarantor_id;
+      const loanAmount = Number(newLoan.amount);
+      const loanMonths = Number(newLoan.months) || 1;
+      const nonMemberName = newLoan.borrower_name;
 
-        const tempLoan: Loan = {
-          id: data.id,
-          member_id: newLoan.member_id ? Number(newLoan.member_id) : null,
-          guarantor_id: Number(newLoan.guarantor_id),
-          borrower_name: newLoan.borrower_name || null,
-          debtor_name: borrower ? borrower.name : (newLoan.borrower_name || 'Unknown'),
-          guarantor_name: guarantor ? guarantor.name : 'Unknown',
-          principal,
-          interest_rate: 0.06,
-          months,
-          status: 'Pending',
-          created_at: new Date().toISOString(),
-          due_at: new Date(new Date().setMonth(new Date().getMonth() + months)).toISOString(),
-          totalInterest,
-          biMonthlyPayment,
-          amountPaid: 0,
-          remainingBalance: totalToPay
-        };
-
-        setContractLoan(tempLoan);
-        
-        setIsAddLoanOpen(false);
-        setIsBorrowerMember(true);
-        setNewLoan({ member_id: '', borrower_name: '', guarantor_id: '', amount: 0, months: 1 });
-        fetchData();
-
-        // Trigger PDF generation with a slightly longer delay to ensure DOM update
-        setTimeout(() => generateContractPDF(tempLoan), 1500);
-      } else {
-        const err = await res.json();
-        alert(err.error);
+      if ((!borrowerId && !nonMemberName) || !guarantorId || !loanAmount) {
+        alert("Borrower, Guarantor, and Amount are required.");
+        return;
       }
+
+      // Eligibility check
+      let borrowerPrincipal = 0;
+      let currentDebt = 0;
+      if (borrowerId) {
+        const txSnap = await getDocs(query(collection(db, 'transactions'), where('member_id', '==', borrowerId), where('type', '==', 'Contribution')));
+        borrowerPrincipal = txSnap.docs.reduce((sum, d) => sum + d.data().amount, 0);
+        
+        const activeLoans = loans.filter(l => l.member_id === borrowerId && l.status === 'Active');
+        currentDebt = activeLoans.reduce((sum, l) => sum + l.remainingBalance, 0);
+      }
+
+      const guarantor = members.find(m => m.id === guarantorId);
+      if (!guarantor) {
+        alert("Guarantor not found.");
+        return;
+      }
+      
+      const gTxSnap = await getDocs(query(collection(db, 'transactions'), where('member_id', '==', guarantorId), where('type', '==', 'Contribution')));
+      const guarantorPrincipal = gTxSnap.docs.reduce((sum, d) => sum + d.data().amount, 0);
+      
+      const totalEligibility = (borrowerPrincipal * 2) + guarantorPrincipal;
+
+      if ((loanAmount + currentDebt) > totalEligibility) {
+        alert(`Loan exceeds eligibility cap. Total limit: ₱${totalEligibility.toLocaleString()}. Current active debt: ₱${currentDebt.toLocaleString()}.`);
+        return;
+      }
+
+      const loanData = {
+        member_id: borrowerId,
+        borrower_name: nonMemberName || null,
+        guarantor_id: guarantorId,
+        principal: loanAmount,
+        interest_rate: 0.06,
+        months: loanMonths,
+        status: 'Pending',
+        created_at: new Date().toISOString(),
+        due_at: new Date(new Date().setMonth(new Date().getMonth() + loanMonths)).toISOString()
+      };
+
+      const docRef = await addDoc(collection(db, 'loans'), loanData);
+      
+      // Prepare loan data for contract generation
+      const borrower = members.find(m => m.id === borrowerId);
+      const totalInterest = loanAmount * 0.06 * loanMonths;
+      const totalToPay = loanAmount + totalInterest;
+      const biMonthlyPayment = totalToPay / (loanMonths * 2);
+
+      const tempLoan: Loan = {
+        id: docRef.id,
+        ...loanData,
+        status: 'Pending' as const,
+        debtor_name: borrower ? borrower.name : (nonMemberName || 'Unknown'),
+        guarantor_name: guarantor.name,
+        totalInterest,
+        biMonthlyPayment,
+        amountPaid: 0,
+        remainingBalance: totalToPay
+      };
+
+      setContractLoan(tempLoan);
+      setIsAddLoanOpen(false);
+      setIsBorrowerMember(true);
+      setNewLoan({ member_id: '', borrower_name: '', guarantor_id: '', amount: 0, months: 1 });
+
+      setTimeout(() => generateContractPDF(tempLoan), 1500);
     } catch (error) {
-      console.error("Error adding loan:", error);
+      handleFirestoreError(error, OperationType.CREATE, 'loans');
     }
   };
 
   const handlePayLoan = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/loan-payments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(loanPayment)
+      const loan = loans.find(l => l.id === loanPayment.loan_id);
+      if (!loan) return;
+
+      const paymentAmount = Number(loanPayment.amount);
+      const totalInterestRate = 0.06 * loan.months;
+      const interestPortion = paymentAmount * (totalInterestRate / (1 + totalInterestRate));
+      const principalPortion = paymentAmount - interestPortion;
+
+      await runTransaction(db, async (transaction) => {
+        const paymentRef = doc(collection(db, 'loan_payments'));
+        transaction.set(paymentRef, {
+          loan_id: loanPayment.loan_id,
+          amount_paid: paymentAmount,
+          interest_portion: interestPortion,
+          principal_portion: principalPortion,
+          date: new Date().toISOString()
+        });
+
+        const totalPrincipalPaid = loan.amountPaid + principalPortion;
+        if (totalPrincipalPaid >= loan.principal) {
+          transaction.update(doc(db, 'loans', loan.id), { status: 'Paid' });
+        }
       });
-      if (res.ok) {
-        setIsPayLoanOpen(false);
-        setLoanPayment({ loan_id: '', amount: 0 });
-        fetchData();
-      }
+
+      setIsPayLoanOpen(false);
+      setLoanPayment({ loan_id: '', amount: 0 });
     } catch (error) {
-      console.error("Error paying loan:", error);
+      handleFirestoreError(error, OperationType.CREATE, 'loan_payments');
     }
   };
 
-  const handleApproveLoan = async (id: number) => {
-    console.log("Approving loan:", id);
+  const handleApproveLoan = async (id: string) => {
     try {
-      const res = await fetch(`/api/loans/${id}/approve`, { method: 'POST' });
-      if (res.ok) {
-        const approvedLoan = loans.find(l => l.id === id);
-        if (approvedLoan) {
-          console.log("Found loan for contract:", approvedLoan.debtor_name);
-          setContractLoan(approvedLoan);
-          // Increased delay and added explicit check
-          setTimeout(() => generateContractPDF(approvedLoan), 1000);
-        }
-        fetchData();
+      await updateDoc(doc(db, 'loans', id), { status: 'Active' });
+      const approvedLoan = loans.find(l => l.id === id);
+      if (approvedLoan) {
+        setContractLoan(approvedLoan);
+        setTimeout(() => generateContractPDF(approvedLoan), 1000);
       }
     } catch (error) {
-      console.error("Error approving loan:", error);
-      alert("Failed to approve loan. Please check console for details.");
+      handleFirestoreError(error, OperationType.UPDATE, `loans/${id}`);
     }
   };
 
@@ -424,12 +633,11 @@ export default function App() {
     }
   };
 
-  const handleRejectLoan = async (id: number) => {
+  const handleRejectLoan = async (id: string) => {
     try {
-      const res = await fetch(`/api/loans/${id}/reject`, { method: 'POST' });
-      if (res.ok) fetchData();
+      await updateDoc(doc(db, 'loans', id), { status: 'Rejected' });
     } catch (error) {
-      console.error("Error rejecting loan:", error);
+      handleFirestoreError(error, OperationType.UPDATE, `loans/${id}`);
     }
   };
 
@@ -480,6 +688,47 @@ Financial Summary:
 
   const filteredMembers = members.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()));
 
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-[#0F172A] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-slate-400 font-medium">Initializing application...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-[#0F172A] flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-[#1E293B] border border-white/10 rounded-3xl p-8 w-full max-w-md shadow-2xl text-center"
+        >
+          <div className="w-20 h-20 bg-emerald-500 rounded-2xl flex items-center justify-center shadow-lg shadow-emerald-500/20 mx-auto mb-6">
+            <Coins className="w-10 h-10 text-white" />
+          </div>
+          <h1 className="text-3xl font-bold mb-2">Savers Fund</h1>
+          <p className="text-slate-400 mb-8">Management System</p>
+          
+          <button 
+            onClick={loginWithGoogle}
+            className="w-full bg-white text-[#0F172A] hover:bg-slate-100 px-6 py-4 rounded-2xl font-bold flex items-center justify-center gap-3 transition-all shadow-xl"
+          >
+            <LogIn className="w-5 h-5" />
+            Sign in with Google
+          </button>
+          
+          <p className="text-xs text-slate-500 mt-8">
+            Securely managed by Firebase Authentication
+          </p>
+        </motion.div>
+      </div>
+    );
+  }
+
   if (isLoading && !summary) {
     return (
       <div className="min-h-screen bg-[#0F172A] flex items-center justify-center">
@@ -524,13 +773,21 @@ Financial Summary:
           ))}
         </div>
 
-        <div className="p-4 border-t border-white/5">
+        <div className="p-4 border-t border-white/5 space-y-2">
           <button 
             onClick={() => fetchData()}
             className="w-full flex items-center gap-3 p-3 rounded-xl text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-all"
           >
             <AlertCircle className="w-6 h-6 shrink-0" />
             <span className="font-medium hidden md:block">Refresh Data</span>
+          </button>
+          
+          <button 
+            onClick={logout}
+            className="w-full flex items-center gap-3 p-3 rounded-xl text-red-400 hover:bg-red-500/10 transition-all"
+          >
+            <LogOut className="w-6 h-6 shrink-0" />
+            <span className="font-medium hidden md:block">Sign Out</span>
           </button>
         </div>
       </nav>
