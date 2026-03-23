@@ -1,20 +1,60 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Savers Fund Management System
 
-# Run and deploy your AI Studio app
+A full-stack application for managing member contributions, loans, and financial records.
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/252b9410-b79c-4a76-a0d4-dc1b67d3a032
+- **Member Management:** Create and track member accounts.
+- **Contribution Tracking:** Record bi-monthly contributions and annual fees.
+- **Loan Management:** Process loan applications with automated interest calculation (6% monthly).
+- **Repayment Tracking:** Record loan payments and track outstanding balances.
+- **Contract Generation:** Generate professional PDF loan agreements.
+- **Financial Dashboard:** Real-time overview of total funds, active loans, and collections.
 
-## Run Locally
+## Tech Stack
 
-**Prerequisites:**  Node.js
+- **Frontend:** React 19, Tailwind CSS 4, Lucide React, Motion.
+- **Backend:** Express.js, Node.js.
+- **Database:** SQLite (via `better-sqlite3`).
+- **PDF Generation:** `html-to-image`, `jspdf`.
 
+## Getting Started
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+### Prerequisites
+
+- Node.js (v18 or higher)
+- npm
+
+### Installation
+
+1. Clone the repository (or export from AI Studio).
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+### Running Locally
+
+To start the development server:
+```bash
+npm run dev
+```
+The application will be available at `http://localhost:3000`.
+
+## Deployment
+
+### AI Studio Hosting
+This application is designed to run on **Google Cloud Run** via AI Studio. You can use the **Share** or **Deploy** buttons in the AI Studio interface to host it instantly.
+
+### GitHub Hosting
+To host this via GitHub:
+1. Use the **Settings > Export to GitHub** feature in AI Studio to sync your code to a repository.
+2. Since this is a full-stack Node.js app with a persistent SQLite database, it **cannot** be hosted on GitHub Pages (which is for static sites only).
+3. We recommend deploying to services that support Node.js and persistent storage, such as:
+   - **Render** (Connect your GitHub repo)
+   - **Fly.io**
+   - **Railway**
+
+## License
+
+MIT
