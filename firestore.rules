@@ -18,9 +18,17 @@ service cloud.firestore {
     // Fields:
     //   - member_id: string (required, ref to members)
     //   - amount: number (required)
-    //   - type: string (required, 'Contribution', 'AnnualFee', 'Penalty', 'Refund')
-    //   - period: string (optional, '15th' or '30th')
-    //   - month: string (optional, 'YYYY-MM')
+    //   - type: string (required, 'AnnualFee', 'Penalty', 'Refund')
+    //   - date: timestamp (required)
+    //
+    // Collection: contributions
+    // Document ID: auto-generated
+    // Fields:
+    //   - member_id: string (required, ref to members)
+    //   - amount: number (required)
+    //   - period: string (required, '15th' or '30th')
+    //   - month: string (required, '01'-'12')
+    //   - year: number (required)
     //   - date: timestamp (required)
     //
     // Collection: loans
@@ -54,8 +62,8 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-          (request.auth.token.email == "juvelynlobingco@gmail.com" && request.auth.token.email_verified == true));
+        ( (request.auth.token.email == "juvelynlobingco@gmail.com" && request.auth.token.email_verified == true) ||
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') );
     }
 
     function hasRequiredFields(fields) {
@@ -70,7 +78,7 @@ service cloud.firestore {
     function isValidMember(data) {
       return hasRequiredFields(['name', 'slots', 'status', 'joined_at']) &&
              data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
-             data.slots is int && data.slots > 0 &&
+             data.slots is number && data.slots > 0 &&
              data.status in ['Active', 'Inactive'] &&
              data.joined_at is timestamp;
     }
@@ -79,7 +87,17 @@ service cloud.firestore {
       return hasRequiredFields(['member_id', 'amount', 'type', 'date']) &&
              data.member_id is string &&
              data.amount is number &&
-             data.type in ['Contribution', 'AnnualFee', 'Penalty', 'Refund'] &&
+             data.type in ['AnnualFee', 'Penalty', 'Refund'] &&
+             data.date is timestamp;
+    }
+
+    function isValidContribution(data) {
+      return hasRequiredFields(['member_id', 'amount', 'period', 'month', 'year', 'date']) &&
+             data.member_id is string &&
+             data.amount is number &&
+             data.period in ['15th', '30th'] &&
+             data.month is string &&
+             data.year is number &&
              data.date is timestamp;
     }
 
@@ -87,7 +105,7 @@ service cloud.firestore {
       return hasRequiredFields(['guarantor_id', 'principal', 'months', 'status', 'created_at', 'due_at']) &&
              data.guarantor_id is string &&
              data.principal is number && data.principal > 0 &&
-             data.months is int && data.months >= 1 && data.months <= 5 &&
+             data.months is number && data.months >= 1 && data.months <= 5 &&
              data.status in ['Pending', 'Active', 'Paid', 'Rejected'] &&
              data.created_at is timestamp &&
              data.due_at is timestamp;
@@ -120,8 +138,13 @@ service cloud.firestore {
 
     match /transactions/{txId} {
       allow read: if isAuthenticated();
-      allow create: if isAdmin() && isValidTransaction(request.resource.data);
-      allow update: if isAdmin() && isValidTransaction(request.resource.data);
+      allow create, update: if isAdmin() && isValidTransaction(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /contributions/{cId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdmin() && isValidContribution(request.resource.data);
       allow delete: if isAdmin();
     }
 

@@ -14,17 +14,29 @@
     },
     "Transaction": {
       "title": "Transaction",
-      "description": "A financial transaction (contribution, fee, etc.)",
+      "description": "A financial transaction (fees, penalties, etc.)",
       "type": "object",
       "properties": {
         "member_id": { "type": "string", "description": "ID of the member" },
         "amount": { "type": "number", "description": "Amount in PHP" },
-        "type": { "type": "string", "enum": ["Contribution", "AnnualFee", "Penalty", "Refund"], "description": "Type of transaction" },
-        "period": { "type": "string", "enum": ["15th", "30th"], "description": "Billing period" },
-        "month": { "type": "string", "description": "YYYY-MM format" },
+        "type": { "type": "string", "enum": ["AnnualFee", "Penalty", "Refund"], "description": "Type of transaction" },
         "date": { "type": "string", "format": "date-time", "description": "Transaction date" }
       },
       "required": ["member_id", "amount", "type", "date"]
+    },
+    "Contribution": {
+      "title": "Contribution",
+      "description": "A member's contribution record",
+      "type": "object",
+      "properties": {
+        "member_id": { "type": "string", "description": "ID of the member" },
+        "amount": { "type": "number", "description": "Amount in PHP" },
+        "period": { "type": "string", "enum": ["15th", "30th"], "description": "Billing period" },
+        "month": { "type": "string", "description": "Month (01-12)" },
+        "year": { "type": "integer", "description": "Year" },
+        "date": { "type": "string", "format": "date-time", "description": "Record date" }
+      },
+      "required": ["member_id", "amount", "period", "month", "year", "date"]
     },
     "Loan": {
       "title": "Loan",
@@ -64,7 +76,11 @@
     },
     "transactions": {
       "schema": "Transaction",
-      "description": "Collection of all financial transactions"
+      "description": "Collection of all financial transactions (fees, etc.)"
+    },
+    "contributions": {
+      "schema": "Contribution",
+      "description": "Collection of member contributions"
     },
     "loans": {
       "schema": "Loan",

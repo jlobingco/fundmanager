@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Users, 
   Plus, 
@@ -65,7 +65,7 @@ interface Member {
   name: string;
   slots: number;
   status: string;
-  joined_at: string;
+  joined_at: Timestamp;
   stats?: {
     principal: number;
     dividendShare: number;
@@ -85,11 +85,34 @@ interface Transaction {
   id: string;
   member_id: string;
   amount: number;
-  type: 'Contribution' | 'AnnualFee' | 'Penalty' | 'Refund';
+  type: 'AnnualFee' | 'Penalty' | 'Refund';
+  date: Timestamp;
+}
+
+interface Contribution {
+  id: string;
+  member_id: string;
+  amount: number;
   period: '15th' | '30th';
   month: string;
-  date: string;
+  year: number;
+  date: Timestamp;
 }
+
+const MONTHS = [
+  { value: '01', label: 'January' },
+  { value: '02', label: 'February' },
+  { value: '03', label: 'March' },
+  { value: '04', label: 'April' },
+  { value: '05', label: 'May' },
+  { value: '06', label: 'June' },
+  { value: '07', label: 'July' },
+  { value: '08', label: 'August' },
+  { value: '09', label: 'September' },
+  { value: '10', label: 'October' },
+  { value: '11', label: 'November' },
+  { value: '12', label: 'December' },
+];
 
 interface Loan {
   id: string;
@@ -102,8 +125,8 @@ interface Loan {
   interest_rate: number;
   months: number;
   status: 'Pending' | 'Active' | 'Paid' | 'Rejected';
-  created_at: string;
-  due_at: string;
+  created_at: Timestamp;
+  due_at: Timestamp;
   totalInterest: number;
   biMonthlyPayment: number;
   amountPaid: number;
@@ -186,10 +209,45 @@ export default function App() {
   const [view, setView] = useState<'dashboard' | 'members' | 'loans' | 'history'>('dashboard');
   const [summary, setSummary] = useState<Summary | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
-  const [loans, setLoans] = useState<Loan[]>([]);
+  const [rawLoans, setRawLoans] = useState<Loan[]>([]);
+  const [paymentsMap, setPaymentsMap] = useState<Record<string, number>>({});
+  
+  const loans = useMemo(() => {
+    return rawLoans.map(loan => {
+      const amountPaid = paymentsMap[loan.id] || 0;
+      const totalToPay = loan.principal + loan.totalInterest;
+      const remainingBalance = Math.max(0, totalToPay - amountPaid);
+
+      let debtor_name = loan.borrower_name || 'Unknown';
+      if (loan.member_id) {
+        const m = members.find(m => m.id === loan.member_id);
+        if (m) debtor_name = m.name;
+      }
+      
+      let guarantor_name = 'Unknown';
+      const g = members.find(m => m.id === loan.guarantor_id);
+      if (g) guarantor_name = g.name;
+
+      return { ...loan, debtor_name, guarantor_name, amountPaid, remainingBalance };
+    });
+  }, [rawLoans, members, paymentsMap]);
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
-  const [contributionHistory, setContributionHistory] = useState<Transaction[]>([]);
-  const [allContributions, setAllContributions] = useState<Transaction[]>([]);
+  const [contributionHistory, setContributionHistory] = useState<(Transaction | Contribution)[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [contributions, setContributions] = useState<Contribution[]>([]);
+  const [allContributions, setAllContributions] = useState<(Transaction | Contribution)[]>([]);
+
+  useEffect(() => {
+    const combined = [
+      ...transactions.filter(t => t.type === 'AnnualFee'),
+      ...contributions
+    ].sort((a, b) => {
+      const dateA = a.date && typeof a.date.toMillis === 'function' ? a.date.toMillis() : 0;
+      const dateB = b.date && typeof b.date.toMillis === 'function' ? b.date.toMillis() : 0;
+      return dateB - dateA;
+    });
+    setAllContributions(combined);
+  }, [transactions, contributions]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
 
@@ -199,10 +257,19 @@ export default function App() {
   const [isAddLoanOpen, setIsAddLoanOpen] = useState(false);
   const [isBorrowerMember, setIsBorrowerMember] = useState(true);
   const [isPayLoanOpen, setIsPayLoanOpen] = useState(false);
+  const [isEditMemberOpen, setIsEditMemberOpen] = useState(false);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [isRefreshConfirmOpen, setIsRefreshConfirmOpen] = useState(false);
   const [contractLoan, setContractLoan] = useState<Loan | null>(null);
   const [memberToDelete, setMemberToDelete] = useState<Member | null>(null);
+  const [editingMember, setEditingMember] = useState<Member | null>(null);
   const [copied, setCopied] = useState(false);
+  const [notification, setNotification] = useState<{ message: string, type: 'success' | 'info' | 'error' } | null>(null);
+
+  const showNotification = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 5000);
+  };
 
   // Form States
   const [newMember, setNewMember] = useState({ name: '', slots: 1 });
@@ -211,7 +278,8 @@ export default function App() {
     amount: 0, 
     isFirstOfYear: false, 
     period: '15th' as '15th' | '30th',
-    month: new Date().toISOString().slice(0, 7)
+    month: (new Date().getMonth() + 1).toString().padStart(2, '0'),
+    year: new Date().getFullYear()
   });
 
   // Auth Listener
@@ -223,21 +291,70 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  const paidAnnualFeeMembers = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    const set = new Set<string>();
+    allContributions.forEach(tx => {
+      if ('type' in tx && tx.type === 'AnnualFee') {
+        const year = (tx.date && typeof tx.date.toDate === 'function' ? tx.date.toDate().getFullYear() : 0);
+        if (year === currentYear) {
+          set.add(tx.member_id);
+        }
+      }
+    });
+    return set;
+  }, [allContributions]);
+
+  const paidPeriods = useMemo(() => {
+    const map: Record<string, Set<'15th' | '30th'>> = {};
+    allContributions.forEach(tx => {
+      if (!('type' in tx)) { // It's a Contribution
+        const key = `${tx.member_id}-${tx.month}-${tx.year}`;
+        if (!map[key]) map[key] = new Set();
+        map[key].add(tx.period);
+      }
+    });
+    return map;
+  }, [allContributions]);
+
+  const memberLatestContribution = useMemo(() => {
+    const map: Record<string, string> = {};
+    allContributions.forEach(tx => {
+      if (!('type' in tx)) { // It's a Contribution
+        const monthLabel = MONTHS.find(m => m.value === tx.month)?.label || tx.month;
+        const display = `${monthLabel} ${tx.year}`;
+        if (!map[tx.member_id]) {
+          map[tx.member_id] = display;
+        }
+      }
+    });
+    return map;
+  }, [allContributions]);
+
   // Auto-compute contribution amount
   useEffect(() => {
     if (newContribution.member_id) {
       const member = members.find(m => m.id === newContribution.member_id);
       if (member) {
         const contributionPerSlot = 500; // Standard contribution per slot
-        const annualFeePerSlot = 200;
-        let total = member.slots * contributionPerSlot;
-        if (newContribution.isFirstOfYear) {
-          total += member.slots * annualFeePerSlot;
+        setNewContribution(prev => ({ ...prev, amount: member.slots * contributionPerSlot }));
+      }
+      
+      // Auto-switch period if current is paid
+      const paid = paidPeriods[`${newContribution.member_id}-${newContribution.month}-${newContribution.year}`];
+      if (paid) {
+        if (paid.has('15th') && !paid.has('30th') && newContribution.period === '15th') {
+          setNewContribution(prev => ({ ...prev, period: '30th' }));
+        } else if (paid.has('30th') && !paid.has('15th') && newContribution.period === '30th') {
+          setNewContribution(prev => ({ ...prev, period: '15th' }));
         }
-        setNewContribution(prev => ({ ...prev, amount: total }));
+      }
+
+      if (paidAnnualFeeMembers.has(newContribution.member_id)) {
+        setNewContribution(prev => ({ ...prev, isFirstOfYear: false }));
       }
     }
-  }, [newContribution.member_id, newContribution.isFirstOfYear, members]);
+  }, [newContribution.member_id, newContribution.month, newContribution.year, members, paidAnnualFeeMembers, paidPeriods]);
 
   const [newLoan, setNewLoan] = useState({ 
     member_id: '', 
@@ -247,11 +364,31 @@ export default function App() {
     months: 1 
   });
   const [loanPayment, setLoanPayment] = useState({ loan_id: '', amount: 0 });
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const handleLogin = async () => {
+    try {
+      setAuthError(null);
+      await loginWithGoogle();
+    } catch (error: any) {
+      if (error.code === 'auth/popup-blocked') {
+        setAuthError('Sign-in popup was blocked by your browser. Please allow popups for this site.');
+      } else if (error.code === 'auth/cancelled-popup-request') {
+        setAuthError('Sign-in was cancelled. Please try again.');
+      } else {
+        setAuthError('An error occurred during sign-in. Please try again.');
+      }
+    }
+  };
 
   useEffect(() => {
+    let cleanup: (() => void) | undefined;
     if (isAuthReady && user) {
-      fetchData();
+      cleanup = fetchData();
     }
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, [isAuthReady, user]);
 
   const fetchData = () => {
@@ -263,75 +400,88 @@ export default function App() {
       setMembers(membersData);
     }, (error) => handleFirestoreError(error, OperationType.LIST, 'members'));
 
-    const unsubLoans = onSnapshot(collection(db, 'loans'), async (snapshot) => {
-      const loansData = await Promise.all(snapshot.docs.map(async (loanDoc) => {
+    const unsubLoans = onSnapshot(collection(db, 'loans'), (snapshot) => {
+      const loansData = snapshot.docs.map((loanDoc) => {
         const data = loanDoc.data();
-        const totalInterest = data.principal * data.interest_rate * data.months;
-        const totalToPay = data.principal + totalInterest;
-        const numPayments = data.months * 2;
-        const biMonthlyPayment = totalToPay / numPayments;
-
-        // Get payments for this loan
-        const paymentsSnap = await getDocs(query(collection(db, 'loan_payments'), where('loan_id', '==', loanDoc.id)));
-        const amountPaid = paymentsSnap.docs.reduce((sum, d) => sum + d.data().amount_paid, 0);
-        const remainingBalance = Math.max(0, totalToPay - amountPaid);
-
-        // Get debtor and guarantor names
-        let debtor_name = data.borrower_name || 'Unknown';
-        if (data.member_id) {
-          const m = members.find(m => m.id === data.member_id);
-          if (m) debtor_name = m.name;
-        }
+        const principal = Number(data.principal) || 0;
+        const interestRate = Number(data.interest_rate) || 0.06;
+        const months = Number(data.months) || 1;
         
-        let guarantor_name = 'Unknown';
-        const g = members.find(m => m.id === data.guarantor_id);
-        if (g) guarantor_name = g.name;
+        const totalInterest = principal * interestRate * months;
+        const totalToPay = principal + totalInterest;
+        const numPayments = months * 2;
+        const biMonthlyPayment = totalToPay / numPayments;
 
         return { 
           id: loanDoc.id, 
           ...data, 
-          debtor_name, 
-          guarantor_name,
+          principal,
+          interest_rate: interestRate,
+          months,
           totalInterest, 
-          biMonthlyPayment, 
-          amountPaid, 
-          remainingBalance 
+          biMonthlyPayment,
         } as Loan;
-      }));
-      setLoans(loansData);
+      });
+      setRawLoans(loansData);
     }, (error) => handleFirestoreError(error, OperationType.LIST, 'loans'));
+
+    const unsubPayments = onSnapshot(collection(db, 'loan_payments'), (snapshot) => {
+      const map: Record<string, number> = {};
+      snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        const loanId = data.loan_id;
+        const amount = Number(data.amount_paid) || 0;
+        map[loanId] = (map[loanId] || 0) + amount;
+      });
+      setPaymentsMap(map);
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'loan_payments'));
 
     const unsubTx = onSnapshot(query(collection(db, 'transactions'), orderBy('date', 'desc')), (snapshot) => {
       const txData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Transaction));
-      setAllContributions(txData.filter(t => t.type === 'Contribution' || t.type === 'AnnualFee'));
+      setTransactions(txData);
     }, (error) => handleFirestoreError(error, OperationType.LIST, 'transactions'));
+
+    const unsubContributions = onSnapshot(query(collection(db, 'contributions'), orderBy('date', 'desc')), (snapshot) => {
+      const cData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Contribution));
+      setContributions(cData);
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'contributions'));
 
     setIsLoading(false);
     return () => {
       unsubMembers();
       unsubLoans();
+      unsubPayments();
       unsubTx();
+      unsubContributions();
     };
   };
 
   // Recalculate summary whenever data changes
   useEffect(() => {
     if (members.length > 0 || loans.length > 0 || allContributions.length > 0) {
-      const totalContributions = allContributions.filter(t => t.type === 'Contribution').reduce((sum, t) => sum + t.amount, 0);
-      const totalAnnualFees = allContributions.filter(t => t.type === 'AnnualFee').reduce((sum, t) => sum + t.amount, 0);
-      const totalPenalties = allContributions.filter(t => t.type === 'Penalty').reduce((sum, t) => sum + t.amount, 0);
-      const totalRefunds = allContributions.filter(t => t.type === 'Refund').reduce((sum, t) => sum + t.amount, 0);
+      const totalContributions = allContributions.filter(t => !('type' in t)).reduce((sum, t) => sum + t.amount, 0);
+      const totalAnnualFees = allContributions.filter(t => 'type' in t && t.type === 'AnnualFee').reduce((sum, t) => sum + t.amount, 0);
+      const totalPenalties = allContributions.filter(t => 'type' in t && t.type === 'Penalty').reduce((sum, t) => sum + t.amount, 0);
+      const totalRefunds = allContributions.filter(t => 'type' in t && t.type === 'Refund').reduce((sum, t) => sum + t.amount, 0);
       
       const activeLoans = loans.filter(l => l.status === 'Active').reduce((sum, l) => sum + l.principal, 0);
       
       const totalMembers = members.filter(m => m.status === 'Active').length;
       const totalSlots = members.filter(m => m.status === 'Active').reduce((sum, m) => sum + m.slots, 0);
 
+      const totalDividendPool = loans
+        .filter(l => l.status === 'Active' || l.status === 'Paid')
+        .reduce((sum, l) => sum + (l.principal * 0.04 * l.months), 0);
+      
+      const totalGuarantorRewards = loans
+        .filter(l => l.status === 'Active' || l.status === 'Paid')
+        .reduce((sum, l) => sum + (l.principal * 0.02 * l.months), 0);
+
       setSummary({
         cashOnHand: (totalContributions + totalAnnualFees + totalPenalties) - (activeLoans + totalRefunds),
         totalPortfolio: activeLoans,
-        dividendPool: 0, // Simplified for now
-        totalGuarantorRewards: 0, // Simplified for now
+        dividendPool: totalDividendPool,
+        totalGuarantorRewards,
         totalPenalties,
         totalMembers,
         totalSlots
@@ -346,15 +496,34 @@ export default function App() {
       
       // Calculate member stats
       const txSnap = await getDocs(query(collection(db, 'transactions'), where('member_id', '==', memberId)));
-      const txs = txSnap.docs.map(d => d.data());
+      const cSnap = await getDocs(query(collection(db, 'contributions'), where('member_id', '==', memberId)));
       
-      const principal = txs.filter(t => t.type === 'Contribution').reduce((sum, t) => sum + t.amount, 0);
+      const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() } as Transaction));
+      const cs = cSnap.docs.map(d => ({ id: d.id, ...d.data() } as Contribution));
+      
+      const principal = cs.reduce((sum, t) => sum + t.amount, 0);
       const annualFees = txs.filter(t => t.type === 'AnnualFee').reduce((sum, t) => sum + t.amount, 0);
       
-      const currentYear = new Date().getFullYear().toString();
-      const annualFeePaidThisYear = txs.some(t => t.type === 'AnnualFee' && t.date.startsWith(currentYear));
+      const currentYear = new Date().getFullYear();
+      const annualFeePaidThisYear = txs.some(t => t.type === 'AnnualFee' && (t.date as Timestamp).toDate().getFullYear() === currentYear);
       
-      const monthsContributed = new Set(txs.filter(t => t.type === 'Contribution').map(t => t.month)).size;
+      const monthsContributed = new Set(cs.map(t => t.month)).size;
+
+      // Global stats for dividend calculation
+      const totalPrincipal = allContributions
+        .filter(t => !('type' in t))
+        .reduce((sum, t) => sum + t.amount, 0);
+      
+      const totalDividendPool = loans
+        .filter(l => l.status === 'Active' || l.status === 'Paid')
+        .reduce((sum, l) => sum + (l.principal * 0.04 * l.months), 0);
+
+      // Member specific rewards
+      const dividendShare = totalPrincipal > 0 ? (principal / totalPrincipal) * totalDividendPool : 0;
+      
+      const guarantorInterest = loans
+        .filter(l => l.guarantor_id === memberId && (l.status === 'Active' || l.status === 'Paid'))
+        .reduce((sum, l) => sum + (l.principal * 0.02 * l.months), 0);
 
       // Member loans
       const mLoans = loans.filter(l => l.status === 'Active' && (l.member_id === memberId || l.borrower_name === member.name || l.guarantor_id === memberId));
@@ -371,8 +540,8 @@ export default function App() {
         ...member,
         stats: {
           principal,
-          dividendShare: 0, 
-          guarantorInterest: 0, 
+          dividendShare, 
+          guarantorInterest, 
           outstandingDebt,
           currentPrincipalDebt,
           totalLoanAmount,
@@ -380,11 +549,16 @@ export default function App() {
           annualFees,
           annualFeePaidThisYear,
           monthsContributed,
-          expectedReceivable: principal - outstandingDebt
+          expectedReceivable: principal + dividendShare + guarantorInterest - outstandingDebt
         }
       });
       
-      setContributionHistory(txs.filter(t => t.type === 'Contribution' || t.type === 'AnnualFee') as Transaction[]);
+      const history = [...txs, ...cs].sort((a, b) => {
+        const dateA = a.date && typeof a.date.toMillis === 'function' ? a.date.toMillis() : 0;
+        const dateB = b.date && typeof b.date.toMillis === 'function' ? b.date.toMillis() : 0;
+        return dateB - dateA;
+      });
+      setContributionHistory(history);
     } catch (error) {
       handleFirestoreError(error, OperationType.GET, `members/${member.id}`);
     } finally {
@@ -398,20 +572,39 @@ export default function App() {
       const q = query(collection(db, 'members'), where('name', '==', newMember.name));
       const snap = await getDocs(q);
       if (!snap.empty) {
-        alert("A member with this name already exists.");
+        showNotification("A member with this name already exists.", "error");
         return;
       }
 
       await addDoc(collection(db, 'members'), {
         ...newMember,
         status: 'Active',
-        joined_at: new Date().toISOString()
+        joined_at: new Date()
       });
       
       setIsAddMemberOpen(false);
       setNewMember({ name: '', slots: 1 });
+      showNotification('Member added successfully.');
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'members');
+    }
+  };
+
+  const handleEditMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingMember) return;
+    try {
+      await updateDoc(doc(db, 'members', editingMember.id), {
+        name: editingMember.name,
+        slots: editingMember.slots,
+        status: editingMember.status
+      });
+      
+      setIsEditMemberOpen(false);
+      setEditingMember(null);
+      showNotification('Member updated successfully.');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `members/${editingMember.id}`);
     }
   };
 
@@ -422,8 +615,37 @@ export default function App() {
       setIsDeleteConfirmOpen(false);
       setMemberToDelete(null);
       if (selectedMember?.id === memberToDelete.id) setSelectedMember(null);
+      showNotification('Member deleted successfully.');
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `members/${memberToDelete.id}`);
+    }
+  };
+
+  const handleRefreshData = async () => {
+    if (user?.email !== 'juvelynlobingco@gmail.com') {
+      showNotification("Only administrators can purge data.", "error");
+      return;
+    }
+    
+    setIsLoading(true);
+    setIsRefreshConfirmOpen(false);
+    
+    try {
+      const collections = ['members', 'transactions', 'contributions', 'loans', 'loan_payments'];
+      
+      for (const collName of collections) {
+        const q = query(collection(db, collName));
+        const snapshot = await getDocs(q);
+        const deletePromises = snapshot.docs.map(doc => deleteDoc(doc.ref));
+        await Promise.all(deletePromises);
+      }
+      
+      showNotification("Database has been successfully purged.", "success");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, "all collections");
+      showNotification("Failed to purge database.", "error");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -439,26 +661,24 @@ export default function App() {
           member_id: newContribution.member_id,
           amount: annualFeeTotal,
           type: 'AnnualFee',
-          period: newContribution.period,
-          month: newContribution.month,
-          date: new Date().toISOString()
+          date: new Date()
         });
-        await addDoc(collection(db, 'transactions'), {
+        await addDoc(collection(db, 'contributions'), {
           member_id: newContribution.member_id,
           amount: newContribution.amount - annualFeeTotal,
-          type: 'Contribution',
           period: newContribution.period,
           month: newContribution.month,
-          date: new Date().toISOString()
+          year: newContribution.year,
+          date: new Date()
         });
       } else {
-        await addDoc(collection(db, 'transactions'), {
+        await addDoc(collection(db, 'contributions'), {
           member_id: newContribution.member_id,
           amount: newContribution.amount,
-          type: 'Contribution',
           period: newContribution.period,
           month: newContribution.month,
-          date: new Date().toISOString()
+          year: newContribution.year,
+          date: new Date()
         });
       }
 
@@ -467,8 +687,9 @@ export default function App() {
       if (selectedMember && newContribution.member_id === selectedMember.id) {
         handleSelectMember(selectedMember);
       }
+      showNotification('Contribution recorded successfully.');
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'transactions');
+      handleFirestoreError(error, OperationType.CREATE, 'contributions');
     }
   };
 
@@ -482,7 +703,7 @@ export default function App() {
       const nonMemberName = newLoan.borrower_name;
 
       if ((!borrowerId && !nonMemberName) || !guarantorId || !loanAmount) {
-        alert("Borrower, Guarantor, and Amount are required.");
+        showNotification("Borrower, Guarantor, and Amount are required.", "error");
         return;
       }
 
@@ -490,8 +711,8 @@ export default function App() {
       let borrowerPrincipal = 0;
       let currentDebt = 0;
       if (borrowerId) {
-        const txSnap = await getDocs(query(collection(db, 'transactions'), where('member_id', '==', borrowerId), where('type', '==', 'Contribution')));
-        borrowerPrincipal = txSnap.docs.reduce((sum, d) => sum + d.data().amount, 0);
+        const cSnap = await getDocs(query(collection(db, 'contributions'), where('member_id', '==', borrowerId)));
+        borrowerPrincipal = cSnap.docs.reduce((sum, d) => sum + d.data().amount, 0);
         
         const activeLoans = loans.filter(l => l.member_id === borrowerId && l.status === 'Active');
         currentDebt = activeLoans.reduce((sum, l) => sum + l.remainingBalance, 0);
@@ -499,17 +720,17 @@ export default function App() {
 
       const guarantor = members.find(m => m.id === guarantorId);
       if (!guarantor) {
-        alert("Guarantor not found.");
+        showNotification("Guarantor not found.", "error");
         return;
       }
       
-      const gTxSnap = await getDocs(query(collection(db, 'transactions'), where('member_id', '==', guarantorId), where('type', '==', 'Contribution')));
-      const guarantorPrincipal = gTxSnap.docs.reduce((sum, d) => sum + d.data().amount, 0);
+      const gCSnap = await getDocs(query(collection(db, 'contributions'), where('member_id', '==', guarantorId)));
+      const guarantorPrincipal = gCSnap.docs.reduce((sum, d) => sum + d.data().amount, 0);
       
       const totalEligibility = (borrowerPrincipal * 2) + guarantorPrincipal;
 
       if ((loanAmount + currentDebt) > totalEligibility) {
-        alert(`Loan exceeds eligibility cap. Total limit: ₱${totalEligibility.toLocaleString()}. Current active debt: ₱${currentDebt.toLocaleString()}.`);
+        showNotification(`Loan exceeds eligibility cap. Total limit: ₱${totalEligibility.toLocaleString()}. Current active debt: ₱${currentDebt.toLocaleString()}.`, "error");
         return;
       }
 
@@ -521,36 +742,18 @@ export default function App() {
         interest_rate: 0.06,
         months: loanMonths,
         status: 'Pending',
-        created_at: new Date().toISOString(),
-        due_at: new Date(new Date().setMonth(new Date().getMonth() + loanMonths)).toISOString()
+        created_at: Timestamp.now(),
+        due_at: Timestamp.fromDate(new Date(new Date().setMonth(new Date().getMonth() + loanMonths)))
       };
 
       const docRef = await addDoc(collection(db, 'loans'), loanData);
       
-      // Prepare loan data for contract generation
-      const borrower = members.find(m => m.id === borrowerId);
-      const totalInterest = loanAmount * 0.06 * loanMonths;
-      const totalToPay = loanAmount + totalInterest;
-      const biMonthlyPayment = totalToPay / (loanMonths * 2);
-
-      const tempLoan: Loan = {
-        id: docRef.id,
-        ...loanData,
-        status: 'Pending' as const,
-        debtor_name: borrower ? borrower.name : (nonMemberName || 'Unknown'),
-        guarantor_name: guarantor.name,
-        totalInterest,
-        biMonthlyPayment,
-        amountPaid: 0,
-        remainingBalance: totalToPay
-      };
-
-      setContractLoan(tempLoan);
       setIsAddLoanOpen(false);
       setIsBorrowerMember(true);
       setNewLoan({ member_id: '', borrower_name: '', guarantor_id: '', amount: 0, months: 1 });
 
-      setTimeout(() => generateContractPDF(tempLoan), 1500);
+      setView('loans');
+      showNotification('Loan request submitted successfully. Awaiting approval.');
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'loans');
     }
@@ -558,34 +761,50 @@ export default function App() {
 
   const handlePayLoan = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!loanPayment.loan_id || loanPayment.amount <= 0) {
+      alert("Please select a loan and enter a valid amount.");
+      return;
+    }
+
     try {
       const loan = loans.find(l => l.id === loanPayment.loan_id);
-      if (!loan) return;
+      if (!loan) throw new Error("Loan not found");
 
       const paymentAmount = Number(loanPayment.amount);
-      const totalInterestRate = 0.06 * loan.months;
+      const interestRate = loan.interest_rate || 0.06;
+      const totalInterestRate = interestRate * loan.months;
       const interestPortion = paymentAmount * (totalInterestRate / (1 + totalInterestRate));
       const principalPortion = paymentAmount - interestPortion;
 
       await runTransaction(db, async (transaction) => {
+        const loanRef = doc(db, 'loans', loan.id);
+        const loanSnap = await transaction.get(loanRef);
+        if (!loanSnap.exists()) throw new Error("Loan document does not exist");
+        
+        const loanData = loanSnap.data();
+        const totalToPay = (loanData.principal || 0) + ((loanData.principal || 0) * (loanData.interest_rate || 0.06) * (loanData.months || 1));
+        
         const paymentRef = doc(collection(db, 'loan_payments'));
         transaction.set(paymentRef, {
           loan_id: loanPayment.loan_id,
           amount_paid: paymentAmount,
           interest_portion: interestPortion,
           principal_portion: principalPortion,
-          date: new Date().toISOString()
+          date: Timestamp.now()
         });
 
-        const totalPrincipalPaid = loan.amountPaid + principalPortion;
-        if (totalPrincipalPaid >= loan.principal) {
-          transaction.update(doc(db, 'loans', loan.id), { status: 'Paid' });
+        // Check if fully paid after this payment
+        // We use loan.amountPaid from state as a base, which is slightly risky but better than before
+        // Ideally we'd sum payments in the transaction but that's not feasible without a counter on the loan doc
+        if (loan.amountPaid + paymentAmount >= totalToPay - 0.01) { // 0.01 for floating point safety
+          transaction.update(loanRef, { status: 'Paid' });
         }
       });
 
       setIsPayLoanOpen(false);
       setLoanPayment({ loan_id: '', amount: 0 });
     } catch (error) {
+      console.error("Payment failed:", error);
       handleFirestoreError(error, OperationType.CREATE, 'loan_payments');
     }
   };
@@ -597,6 +816,7 @@ export default function App() {
       if (approvedLoan) {
         setContractLoan(approvedLoan);
         setTimeout(() => generateContractPDF(approvedLoan), 1000);
+        showNotification('Loan approved. Generating contract...');
       }
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `loans/${id}`);
@@ -629,13 +849,14 @@ export default function App() {
       setContractLoan(null);
     } catch (error) {
       console.error("Error generating contract PDF:", error);
-      alert("Contract PDF generation failed. You can try the manual download button in the loan details.");
+      showNotification("Contract PDF generation failed. You can try the manual download button in the loan details.", "error");
     }
   };
 
   const handleRejectLoan = async (id: string) => {
     try {
       await updateDoc(doc(db, 'loans', id), { status: 'Rejected' });
+      showNotification('Loan request rejected.', 'info');
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `loans/${id}`);
     }
@@ -643,6 +864,12 @@ export default function App() {
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(amount);
+  };
+
+  const formatDate = (ts: any) => {
+    if (!ts) return 'N/A';
+    if (typeof ts.toDate === 'function') return ts.toDate().toLocaleDateString();
+    return new Date(ts).toLocaleDateString();
   };
 
   const handleCopyMemberDetails = async () => {
@@ -714,12 +941,18 @@ Financial Summary:
           <p className="text-slate-400 mb-8">Management System</p>
           
           <button 
-            onClick={loginWithGoogle}
+            onClick={handleLogin}
             className="w-full bg-white text-[#0F172A] hover:bg-slate-100 px-6 py-4 rounded-2xl font-bold flex items-center justify-center gap-3 transition-all shadow-xl"
           >
             <LogIn className="w-5 h-5" />
             Sign in with Google
           </button>
+          
+          {authError && (
+            <p className="text-red-400 text-sm mt-4 bg-red-500/10 p-3 rounded-xl border border-red-500/20">
+              {authError}
+            </p>
+          )}
           
           <p className="text-xs text-slate-500 mt-8">
             Securely managed by Firebase Authentication
@@ -742,6 +975,27 @@ Financial Summary:
 
   return (
     <div className="min-h-screen bg-[#0F172A] text-slate-200 font-sans selection:bg-emerald-500/30">
+      {/* Notifications */}
+      <AnimatePresence>
+        {notification && (
+          <motion.div 
+            initial={{ opacity: 0, y: 50, x: '-50%' }}
+            animate={{ opacity: 1, y: 0, x: '-50%' }}
+            exit={{ opacity: 0, y: 50, x: '-50%' }}
+            className={`fixed bottom-8 left-1/2 z-[100] px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 border ${
+              notification.type === 'success' ? 'bg-emerald-500 border-emerald-400 text-white' :
+              notification.type === 'error' ? 'bg-red-500 border-red-400 text-white' :
+              'bg-blue-500 border-blue-400 text-white'
+            }`}
+          >
+            {notification.type === 'success' && <Check className="w-5 h-5" />}
+            {notification.type === 'error' && <AlertCircle className="w-5 h-5" />}
+            {notification.type === 'info' && <AlertCircle className="w-5 h-5" />}
+            <span className="font-bold text-sm">{notification.message}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Sidebar Navigation */}
       <nav className="fixed left-0 top-0 bottom-0 w-20 md:w-64 bg-[#1E293B]/50 backdrop-blur-xl border-r border-white/5 z-40 flex flex-col">
         <div className="p-6 flex items-center gap-3">
@@ -775,7 +1029,7 @@ Financial Summary:
 
         <div className="p-4 border-t border-white/5 space-y-2">
           <button 
-            onClick={() => fetchData()}
+            onClick={() => setIsRefreshConfirmOpen(true)}
             className="w-full flex items-center gap-3 p-3 rounded-xl text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-all"
           >
             <AlertCircle className="w-6 h-6 shrink-0" />
@@ -796,23 +1050,37 @@ Financial Summary:
       <main className="pl-20 md:pl-64 min-h-screen">
         <header className="sticky top-0 bg-[#0F172A]/80 backdrop-blur-md border-b border-white/5 z-30 px-8 py-4 flex items-center justify-between">
           <h2 className="text-2xl font-bold capitalize">{view}</h2>
-          <div className="flex items-center gap-4">
-            <div className="relative hidden sm:block">
+          <div className="flex items-center gap-3">
+            <div className="relative hidden lg:block mr-2">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
               <input 
                 type="text" 
                 placeholder="Search members..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="bg-[#1E293B] border border-white/10 rounded-full pl-10 pr-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/50 w-64 transition-all"
+                className="bg-[#1E293B] border border-white/10 rounded-full pl-10 pr-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/50 w-48 xl:w-64 transition-all"
               />
             </div>
+            <button 
+              onClick={() => setIsAddMemberOpen(true)}
+              className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center gap-2 transition-all shadow-lg"
+            >
+              <Plus className="w-4 h-4" />
+              <span className="hidden sm:inline">Add Member</span>
+            </button>
+            <button 
+              onClick={() => setIsAddLoanOpen(true)}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-500/20"
+            >
+              <HandCoins className="w-4 h-4" />
+              <span className="hidden sm:inline">Apply for Loan</span>
+            </button>
             <button 
               onClick={() => setIsAddContributionOpen(true)}
               className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-emerald-500/20"
             >
               <Plus className="w-4 h-4" />
-              Record Contribution
+              <span className="hidden sm:inline">Record Contribution</span>
             </button>
           </div>
         </header>
@@ -835,12 +1103,6 @@ Financial Summary:
                 <Card className="lg:col-span-2">
                   <div className="flex items-center justify-between mb-6">
                     <h3 className="text-xl font-bold">Members Directory</h3>
-                    <button 
-                      onClick={() => setIsAddMemberOpen(true)}
-                      className="text-emerald-500 hover:text-emerald-400 text-sm font-bold flex items-center gap-1"
-                    >
-                      <Plus className="w-4 h-4" /> Add Member
-                    </button>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left">
@@ -848,6 +1110,7 @@ Financial Summary:
                         <tr className="text-slate-400 text-sm border-b border-white/5">
                           <th className="pb-4 font-medium">Name</th>
                           <th className="pb-4 font-medium">Slots</th>
+                          <th className="pb-4 font-medium">Recent Contribution</th>
                           <th className="pb-4 font-medium">Status</th>
                           <th className="pb-4 font-medium text-right">Action</th>
                         </tr>
@@ -857,6 +1120,9 @@ Financial Summary:
                           <tr key={member.id} className="group hover:bg-white/5 transition-colors">
                             <td className="py-4 font-medium">{member.name}</td>
                             <td className="py-4">{member.slots}</td>
+                            <td className="py-4 text-slate-400 text-sm">
+                              {memberLatestContribution[member.id] || 'No contributions'}
+                            </td>
                             <td className="py-4">
                               <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
                                 member.status === 'Active' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-500/10 text-slate-500'
@@ -869,12 +1135,21 @@ Financial Summary:
                                 <button 
                                   onClick={() => handleSelectMember(member)}
                                   className="p-2 hover:bg-emerald-500/10 hover:text-emerald-500 rounded-lg transition-all"
+                                  title="View Details"
                                 >
                                   <ChevronRight className="w-5 h-5" />
                                 </button>
                                 <button 
+                                  onClick={() => { setEditingMember(member); setIsEditMemberOpen(true); }}
+                                  className="p-2 hover:bg-blue-500/10 hover:text-blue-500 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                  title="Edit Member"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button 
                                   onClick={() => { setMemberToDelete(member); setIsDeleteConfirmOpen(true); }}
                                   className="p-2 hover:bg-red-500/10 hover:text-red-500 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                  title="Delete Member"
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </button>
@@ -909,12 +1184,6 @@ Financial Summary:
                   <Card className="bg-gradient-to-br from-emerald-500/20 to-blue-500/20 border-emerald-500/20">
                     <h3 className="text-xl font-bold mb-2">Loan Eligibility</h3>
                     <p className="text-slate-400 text-sm mb-4">Max eligibility: 2x total contribution principal plus guarantor principal.</p>
-                    <button 
-                      onClick={() => setIsAddLoanOpen(true)}
-                      className="w-full bg-white text-[#0F172A] py-3 rounded-xl font-bold hover:bg-slate-200 transition-all"
-                    >
-                      Apply for Loan
-                    </button>
                   </Card>
                 </div>
               </div>
@@ -1006,20 +1275,29 @@ Financial Summary:
                       </h3>
                       <div className="space-y-4">
                         {contributionHistory.length > 0 ? (
-                          contributionHistory.slice(0, 5).map((tx) => (
-                            <div key={tx.id} className="flex items-center justify-between p-3 rounded-xl bg-white/5">
-                              <div className="flex items-center gap-3">
-                                <div className={`p-2 rounded-lg ${tx.type === 'Contribution' ? 'bg-emerald-500/20 text-emerald-500' : 'bg-blue-500/20 text-blue-500'}`}>
-                                  {tx.type === 'Contribution' ? <ArrowUpRight className="w-4 h-4" /> : <Calendar className="w-4 h-4" />}
+                          contributionHistory.slice(0, 5).map((tx) => {
+                            const isContribution = !('type' in tx);
+                            const typeLabel = isContribution ? 'Contribution' : tx.type;
+                            const periodLabel = isContribution ? tx.period : '';
+                            
+                            return (
+                              <div key={tx.id} className="flex items-center justify-between p-3 rounded-xl bg-white/5">
+                                <div className="flex items-center gap-3">
+                                  <div className={`p-2 rounded-lg ${typeLabel === 'Contribution' ? 'bg-emerald-500/20 text-emerald-500' : 'bg-blue-500/20 text-blue-500'}`}>
+                                    {typeLabel === 'Contribution' ? <ArrowUpRight className="w-4 h-4" /> : <Calendar className="w-4 h-4" />}
+                                  </div>
+                                  <div>
+                                    <p className="font-medium">{typeLabel}</p>
+                                    <p className="text-xs text-slate-400">
+                                      {formatDate(tx.date)} {periodLabel ? `• ${periodLabel}` : ''}
+                                      {isContribution ? ` • ${MONTHS.find(m => m.value === tx.month)?.label} ${tx.year}` : ''}
+                                    </p>
+                                  </div>
                                 </div>
-                                <div>
-                                  <p className="font-medium">{tx.type}</p>
-                                  <p className="text-xs text-slate-400">{new Date(tx.date).toLocaleDateString()} • {tx.period}</p>
-                                </div>
+                                <p className="font-bold">{formatCurrency(tx.amount)}</p>
                               </div>
-                              <p className="font-bold">{formatCurrency(tx.amount)}</p>
-                            </div>
-                          ))
+                            );
+                          })
                         ) : (
                           <p className="text-slate-500 text-center py-8">No contributions recorded yet.</p>
                         )}
@@ -1032,13 +1310,17 @@ Financial Summary:
                         Active Loans
                       </h3>
                       <div className="space-y-4">
-                        {loans.filter(l => (l.member_id === selectedMember.id || l.borrower_name === selectedMember.name) && l.status === 'Active').length > 0 ? (
-                          loans.filter(l => (l.member_id === selectedMember.id || l.borrower_name === selectedMember.name) && l.status === 'Active').map((loan) => (
+                        {loans.filter(l => (l.member_id === selectedMember.id || l.borrower_name === selectedMember.name || l.guarantor_id === selectedMember.id) && l.status === 'Active').length > 0 ? (
+                          loans.filter(l => (l.member_id === selectedMember.id || l.borrower_name === selectedMember.name || l.guarantor_id === selectedMember.id) && l.status === 'Active').map((loan) => (
                             <div key={loan.id} className="p-4 rounded-xl bg-white/5 space-y-3">
                               <div className="flex justify-between items-start">
                                 <div>
+                                  <p className="font-bold text-sm text-emerald-500 mb-1">{loan.debtor_name}</p>
                                   <p className="font-bold text-lg">{formatCurrency(loan.principal)}</p>
-                                  <p className="text-xs text-slate-400">Due: {new Date(loan.due_at).toLocaleDateString()}</p>
+                                  <p className="text-xs text-slate-400">Due: {formatDate(loan.due_at)}</p>
+                                  {loan.guarantor_id === selectedMember.id && loan.member_id !== selectedMember.id && (
+                                    <p className="text-[10px] text-blue-400 font-bold uppercase mt-1">Guaranteed by you</p>
+                                  )}
                                 </div>
                                 <button 
                                   onClick={() => { setLoanPayment({ loan_id: loan.id.toString(), amount: loan.biMonthlyPayment }); setIsPayLoanOpen(true); }}
@@ -1073,8 +1355,8 @@ Financial Summary:
           {view === 'members' && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {filteredMembers.map(member => (
-                <Card key={member.id} className="hover:border-emerald-500/30 transition-all cursor-pointer" onClick={() => { handleSelectMember(member); setView('dashboard'); }}>
-                  <div className="flex items-center gap-4 mb-4">
+                <Card key={member.id} className="hover:border-emerald-500/30 transition-all group relative">
+                  <div className="flex items-center gap-4 mb-4 cursor-pointer" onClick={() => { handleSelectMember(member); setView('dashboard'); }}>
                     <div className="w-12 h-12 bg-slate-700 rounded-xl flex items-center justify-center text-xl font-bold text-white">
                       {member.name[0]}
                     </div>
@@ -1084,8 +1366,29 @@ Financial Summary:
                     </div>
                   </div>
                   <div className="flex justify-between items-center pt-4 border-t border-white/5">
-                    <span className="text-xs text-slate-500">Joined {new Date(member.joined_at).toLocaleDateString()}</span>
-                    <ChevronRight className="w-4 h-4 text-slate-500" />
+                    <span className="text-xs text-slate-500">Joined {formatDate(member.joined_at)}</span>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); setEditingMember(member); setIsEditMemberOpen(true); }}
+                        className="p-2 hover:bg-blue-500/10 hover:text-blue-500 rounded-lg transition-all"
+                        title="Edit Member"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); setMemberToDelete(member); setIsDeleteConfirmOpen(true); }}
+                        className="p-2 hover:bg-red-500/10 hover:text-red-500 rounded-lg transition-all"
+                        title="Delete Member"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={() => { handleSelectMember(member); setView('dashboard'); }}
+                        className="p-2 hover:bg-emerald-500/10 hover:text-emerald-500 rounded-lg transition-all"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 </Card>
               ))}
@@ -1222,18 +1525,25 @@ Financial Summary:
                 <div className="space-y-2">
                   {allContributions.map(tx => {
                     const member = members.find(m => m.id === tx.member_id);
+                    const isContribution = !('type' in tx);
+                    const typeLabel = isContribution ? 'Contribution' : tx.type;
+                    const periodLabel = isContribution ? tx.period : '';
+                    
                     return (
                       <div key={tx.id} className="flex items-center justify-between p-4 rounded-xl hover:bg-white/5 transition-all border-b border-white/5 last:border-0">
                         <div className="flex items-center gap-4">
-                          <div className={`p-2 rounded-lg ${tx.type === 'Contribution' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-blue-500/10 text-blue-500'}`}>
-                            {tx.type === 'Contribution' ? <ArrowUpRight className="w-5 h-5" /> : <Calendar className="w-5 h-5" />}
+                          <div className={`p-2 rounded-lg ${typeLabel === 'Contribution' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-blue-500/10 text-blue-500'}`}>
+                            {typeLabel === 'Contribution' ? <ArrowUpRight className="w-5 h-5" /> : <Calendar className="w-5 h-5" />}
                           </div>
                           <div>
                             <p className="font-bold">{member?.name || 'Unknown Member'}</p>
-                            <p className="text-xs text-slate-400">{new Date(tx.date).toLocaleString()} • {tx.type} • {tx.period}</p>
+                            <p className="text-xs text-slate-400">
+                              {formatDate(tx.date)} • {typeLabel} {periodLabel ? `• ${periodLabel}` : ''}
+                              {isContribution ? ` • ${MONTHS.find(m => m.value === tx.month)?.label} ${tx.year}` : ''}
+                            </p>
                           </div>
                         </div>
-                        <p className={`font-black text-lg ${tx.type === 'Contribution' ? 'text-emerald-500' : 'text-blue-400'}`}>
+                        <p className={`font-black text-lg ${typeLabel === 'Contribution' ? 'text-emerald-500' : 'text-blue-400'}`}>
                           {formatCurrency(tx.amount)}
                         </p>
                       </div>
@@ -1277,6 +1587,50 @@ Financial Summary:
         </form>
       </Modal>
 
+      <Modal isOpen={isEditMemberOpen} onClose={() => setIsEditMemberOpen(false)} title="Edit Member Details">
+        {editingMember && (
+          <form onSubmit={handleEditMember} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Full Name</label>
+              <input 
+                type="text" 
+                required
+                value={editingMember.name}
+                onChange={e => setEditingMember({...editingMember, name: e.target.value})}
+                className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Slots</label>
+                <input 
+                  type="number" 
+                  min="1"
+                  required
+                  value={editingMember.slots}
+                  onChange={e => setEditingMember({...editingMember, slots: parseInt(e.target.value) || 0})}
+                  className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Status</label>
+                <select 
+                  value={editingMember.status}
+                  onChange={e => setEditingMember({...editingMember, status: e.target.value})}
+                  className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                >
+                  <option value="Active">Active</option>
+                  <option value="Inactive">Inactive</option>
+                </select>
+              </div>
+            </div>
+            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white py-4 rounded-xl font-bold transition-all shadow-lg shadow-blue-500/20">
+              Update Member Information
+            </button>
+          </form>
+        )}
+      </Modal>
+
       <Modal isOpen={isAddContributionOpen} onClose={() => setIsAddContributionOpen(false)} title="Record Contribution">
         <form onSubmit={handleAddContribution} className="space-y-4">
           <div>
@@ -1293,14 +1647,45 @@ Financial Summary:
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
+              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Month</label>
+              <select 
+                value={newContribution.month}
+                onChange={e => setNewContribution({...newContribution, month: e.target.value})}
+                className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+              >
+                {MONTHS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Year</label>
+              <input 
+                type="number"
+                value={newContribution.year}
+                onChange={e => setNewContribution({...newContribution, year: parseInt(e.target.value) || new Date().getFullYear()})}
+                className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
               <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Period</label>
               <select 
                 value={newContribution.period}
                 onChange={e => setNewContribution({...newContribution, period: e.target.value as any})}
                 className="w-full bg-[#1E293B] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
               >
-                <option value="15th">15th</option>
-                <option value="30th">30th</option>
+                <option 
+                  value="15th" 
+                  disabled={newContribution.member_id ? paidPeriods[`${newContribution.member_id}-${newContribution.month}-${newContribution.year}`]?.has('15th') : false}
+                >
+                  15th {newContribution.member_id && paidPeriods[`${newContribution.member_id}-${newContribution.month}-${newContribution.year}`]?.has('15th') ? '(Paid)' : ''}
+                </option>
+                <option 
+                  value="30th" 
+                  disabled={newContribution.member_id ? paidPeriods[`${newContribution.member_id}-${newContribution.month}-${newContribution.year}`]?.has('30th') : false}
+                >
+                  30th {newContribution.member_id && paidPeriods[`${newContribution.member_id}-${newContribution.month}-${newContribution.year}`]?.has('30th') ? '(Paid)' : ''}
+                </option>
               </select>
             </div>
             <div>
@@ -1319,11 +1704,16 @@ Financial Summary:
             <input 
               type="checkbox" 
               id="isFirst"
+              disabled={newContribution.member_id ? paidAnnualFeeMembers.has(newContribution.member_id) : false}
               checked={newContribution.isFirstOfYear}
               onChange={e => setNewContribution({...newContribution, isFirstOfYear: e.target.checked})}
-              className="w-5 h-5 rounded border-white/10 bg-[#1E293B] text-emerald-500 focus:ring-emerald-500/50"
+              className="w-5 h-5 rounded border-white/10 bg-[#1E293B] text-emerald-500 focus:ring-emerald-500/50 disabled:opacity-50"
             />
-            <label htmlFor="isFirst" className="text-sm font-medium">Include Annual Fee (₱200/slot)</label>
+            <label htmlFor="isFirst" className={`text-sm font-medium ${newContribution.member_id && paidAnnualFeeMembers.has(newContribution.member_id) ? 'text-slate-500' : ''}`}>
+              {newContribution.member_id && paidAnnualFeeMembers.has(newContribution.member_id) 
+                ? 'Annual Fee Paid for this Year' 
+                : 'Include Annual Fee (₱200/slot)'}
+            </label>
           </div>
           <button type="submit" className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-4 rounded-xl font-bold transition-all">
             Post Transaction
@@ -1478,6 +1868,36 @@ Financial Summary:
         </div>
       </Modal>
 
+      <Modal 
+        isOpen={isRefreshConfirmOpen} 
+        onClose={() => setIsRefreshConfirmOpen(false)} 
+        title="Confirm Database Purge"
+      >
+        <div className="space-y-6">
+          <div className="flex items-center gap-4 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-500">
+            <AlertCircle className="w-8 h-8 shrink-0" />
+            <p className="text-sm font-medium leading-relaxed">
+              <strong>Warning:</strong> This action will permanently delete ALL data from the database, including members, contributions, and loans. This cannot be undone.
+            </p>
+          </div>
+          
+          <div className="flex gap-3">
+            <button 
+              onClick={() => setIsRefreshConfirmOpen(false)}
+              className="flex-1 px-6 py-3 bg-white/5 border border-white/10 rounded-xl font-bold hover:bg-white/10 transition-all"
+            >
+              Cancel
+            </button>
+            <button 
+              onClick={handleRefreshData}
+              className="flex-1 px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-xl font-bold transition-all shadow-lg shadow-red-500/20"
+            >
+              Confirm Purge
+            </button>
+          </div>
+        </div>
+      </Modal>
+
       {/* Hidden Contract Template for PDF Generation */}
       {contractLoan && (
         <div style={{ position: 'fixed', left: 0, top: 0, width: '1px', height: '1px', overflow: 'hidden', zIndex: -100, opacity: 0.01 }}>
@@ -1540,7 +1960,7 @@ Financial Summary:
                   </div>
                   <div>
                     <p className="text-xs text-slate-500 uppercase font-bold">Due Date</p>
-                    <p className="text-xl font-bold">{new Date(contractLoan.due_at).toLocaleDateString()}</p>
+                    <p className="text-xl font-bold">{formatDate(contractLoan.due_at)}</p>
                   </div>
                 </div>
               </section>
